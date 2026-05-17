@@ -46,6 +46,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/new — write a new post\n"
         "/drafts — list & publish drafts\n"
         "/posts — recent published posts\n"
+        "/delete — delete a post\n"
         "/restart — restart blog service\n"
         "/status — service status"
     )
@@ -203,6 +204,61 @@ async def cmd_posts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Recent posts:\n{lines}")
 
 
+# ── /delete ───────────────────────────────────────────────────────────────────
+
+async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    files = sorted(POSTS_DIR.glob("*.md"), reverse=True)
+    if not files:
+        await update.message.reply_text("No posts to delete.")
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f.name, callback_data=f"del:{f.name}")]
+        for f in files
+    ])
+    await update.message.reply_text("Select post to delete:", reply_markup=kb)
+
+
+async def delete_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return
+    fname = q.data.split(":", 1)[1]
+    path  = POSTS_DIR / fname
+    if not path.exists():
+        await q.edit_message_text("Post not found.")
+        return
+    ctx.user_data["delete"] = fname
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Yes, delete", callback_data="delconf:yes"),
+        InlineKeyboardButton("Cancel",      callback_data="delconf:no"),
+    ]])
+    await q.edit_message_text(f"Delete *{fname}*?", parse_mode="Markdown", reply_markup=kb)
+
+
+async def delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_admin(update):
+        return
+    if q.data == "delconf:no":
+        await q.edit_message_text("Cancelled.")
+        return
+    fname = ctx.user_data.get("delete")
+    if not fname:
+        await q.edit_message_text("No post selected.")
+        return
+    path = POSTS_DIR / fname
+    if path.exists():
+        path.unlink()
+        shell("systemctl restart blog")
+        await q.edit_message_text(f"Deleted ✓\n{fname}")
+    else:
+        await q.edit_message_text("Post not found.")
+
+
 # ── /restart ──────────────────────────────────────────────────────────────────
 
 async def cmd_restart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -246,6 +302,9 @@ def main():
     app.add_handler(CallbackQueryHandler(draft_pick,    pattern=r"^draft:"))
     app.add_handler(CallbackQueryHandler(draft_publish, pattern=r"^dpub:"))
     app.add_handler(CommandHandler("posts",   cmd_posts))
+    app.add_handler(CommandHandler("delete",  cmd_delete))
+    app.add_handler(CallbackQueryHandler(delete_pick,    pattern=r"^del:"))
+    app.add_handler(CallbackQueryHandler(delete_confirm, pattern=r"^delconf:"))
     app.add_handler(CommandHandler("restart", cmd_restart))
     app.add_handler(CommandHandler("status",  cmd_status))
 
