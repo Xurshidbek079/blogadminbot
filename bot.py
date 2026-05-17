@@ -12,13 +12,25 @@ from telegram.ext import (
     filters, ContextTypes,
 )
 
-BOT_TOKEN  = os.environ["BOT_TOKEN"]
-ADMIN_ID   = int(os.environ["ADMIN_ID"])
-BLOG_DIR   = Path("/root/blog")
-POSTS_DIR  = BLOG_DIR / "content/posts"
-DRAFTS_DIR = BLOG_DIR / "content/drafts"
+BOT_TOKEN   = os.environ["BOT_TOKEN"]
+ADMIN_ID    = int(os.environ["ADMIN_ID"])
+BLOG_DIR    = Path("/root/blog")
+POSTS_DIR   = BLOG_DIR / "content/posts"
+DRAFTS_DIR  = BLOG_DIR / "content/drafts"
+CONTENT_DIR = BLOG_DIR / "content"
 
-TITLE, TAGS, CONTENT, CONFIRM = range(4)
+# Conversation states
+TITLE, TAGS, CONTENT, CONFIRM = range(4)   # /new flow
+PAGE_PICK, PAGE_CONTENT       = range(4, 6) # /pages flow
+
+PAGES = {
+    "About":    "about.md",
+    "Now":      "now.md",
+    "Contact":  "contact.md",
+    "Projects": "projects.yaml",
+    "Books":    "books.yaml",
+    "Tools":    "tools.yaml",
+}
 
 
 def is_admin(update: Update) -> bool:
@@ -47,6 +59,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/drafts — list & publish drafts\n"
         "/posts — recent published posts\n"
         "/delete — delete a post\n"
+        "/pages — edit a page (About, Now, Contact, Projects, Books, Tools)\n"
         "/restart — restart blog service\n"
         "/status — service status"
     )
@@ -259,6 +272,57 @@ async def delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("Post not found.")
 
 
+# ── /pages conversation ───────────────────────────────────────────────────────
+
+async def cmd_pages(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return ConversationHandler.END
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(label, callback_data=f"page:{fname}")]
+        for label, fname in PAGES.items()
+    ])
+    await update.message.reply_text("Which page do you want to edit?", reply_markup=kb)
+    return PAGE_PICK
+
+
+async def page_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    fname = q.data.split(":", 1)[1]
+    ctx.user_data["edit_page"] = fname
+    path = CONTENT_DIR / fname
+    current = path.read_text(encoding="utf-8") if path.exists() else "(empty)"
+
+    # Telegram message limit is 4096 chars; leave room for the prompt
+    if len(current) > 3000:
+        preview = current[:3000] + "\n… (truncated)"
+    else:
+        preview = current
+
+    ext = fname.rsplit(".", 1)[-1]
+    fmt = "YAML" if ext == "yaml" else "Markdown"
+    await q.edit_message_text(
+        f"*{fname}* (current content):\n\n```\n{preview}\n```\n\n"
+        f"Send the full new {fmt} content, or /cancel:",
+        parse_mode="Markdown",
+    )
+    return PAGE_CONTENT
+
+
+async def page_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    fname = ctx.user_data.get("edit_page")
+    path  = CONTENT_DIR / fname
+    path.write_text(update.message.text, encoding="utf-8")
+    shell("systemctl restart blog")
+    await update.message.reply_text(f"Saved ✓ {fname}")
+    return ConversationHandler.END
+
+
+async def pages_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+
 # ── /restart ──────────────────────────────────────────────────────────────────
 
 async def cmd_restart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -296,8 +360,18 @@ def main():
         fallbacks=[CommandHandler("cancel", new_cancel)],
     )
 
+    pages_conv = ConversationHandler(
+        entry_points=[CommandHandler("pages", cmd_pages)],
+        states={
+            PAGE_PICK:    [CallbackQueryHandler(page_pick, pattern=r"^page:")],
+            PAGE_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, page_save)],
+        },
+        fallbacks=[CommandHandler("cancel", pages_cancel)],
+    )
+
     app.add_handler(CommandHandler("start",   cmd_start))
     app.add_handler(new_conv)
+    app.add_handler(pages_conv)
     app.add_handler(CommandHandler("drafts",  cmd_drafts))
     app.add_handler(CallbackQueryHandler(draft_pick,    pattern=r"^draft:"))
     app.add_handler(CallbackQueryHandler(draft_publish, pattern=r"^dpub:"))
